@@ -1,6 +1,6 @@
 """
 dashboard_mantenimientos_con_calendario.py
-DASHBOARD 
+DASHBOARD
 """
 import pandas as pd
 import numpy as np
@@ -15,7 +15,7 @@ from dateutil.relativedelta import relativedelta
 warnings.filterwarnings('ignore')
 
 # ============================================
-# 1. URLs (REEMPLAZA)
+# 1. URLs (REEMPLAZA CON TUS URLS REALES)
 # ============================================
 
 URL_MANTENIMIENTOS = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSI2Ujvaj6GKzQDfhFXZbZ3bzRRtUNluxlPLVQuyruijv4ILq6jMWasYR44BRr4lLxlUg9ZBU28FUek/pub?gid=424956520&single=true&output=csv"
@@ -23,7 +23,109 @@ URL_HISTORICO = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTIRp3QEfyTn35R
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSI2Ujvaj6GKzQDfhFXZbZ3bzRRtUNluxlPLVQuyruijv4ILq6jMWasYR44BRr4lLxlUg9ZBU28FUek/pub?gid=41327256&single=true&output=csv"
 
 # ============================================
-# 2. FUNCIONES PARA CALENDARIO
+# 2. FUNCIONES AUXILIARES MEJORADAS
+# ============================================
+
+def obtener_ultimo_mantenimiento(df_mto, unidad, tipo_servicio=None):
+    """Obtiene el último mantenimiento de una unidad (opcionalmente filtrado por tipo)"""
+    df_unidad = df_mto[df_mto['Nombre Unidad'] == unidad].copy()
+    
+    if tipo_servicio:
+        mask = df_unidad['TIPO DE SERVICIO'].str.contains(tipo_servicio, case=False, na=False)
+        df_unidad = df_unidad[mask]
+    
+    if len(df_unidad) == 0:
+        return None, None, None
+    
+    # Ordenar por fecha descendente y tomar el último
+    df_unidad = df_unidad.sort_values('FECHA', ascending=False)
+    ultimo = df_unidad.iloc[0]
+    
+    return ultimo['FECHA'], ultimo['KILOMETRAJE'], ultimo['TIPO DE SERVICIO']
+
+def obtener_ultimos_mantenimientos_por_tipo(df_mto, unidad):
+    """Obtiene los últimos mantenimientos por tipo de servicio"""
+    if 'TIPO DE SERVICIO' not in df_mto.columns:
+        return {'general': obtener_ultimo_mantenimiento(df_mto, unidad)}
+    
+    tipos_unicos = df_mto['TIPO DE SERVICIO'].dropna().unique()
+    resultados = {}
+    
+    for tipo in tipos_unicos:
+        fecha, km, servicio = obtener_ultimo_mantenimiento(df_mto, unidad, tipo)
+        if fecha and km:
+            resultados[str(tipo).lower()] = {
+                'fecha': fecha,
+                'kilometraje': km,
+                'servicio': servicio
+            }
+    
+    return resultados
+
+def obtener_ultimo_kilometraje(df_hist, unidad):
+    """Obtiene el último kilometraje registrado en el histórico"""
+    df_unidad = df_hist[df_hist['Nombre Unidad'] == unidad].copy()
+    
+    if len(df_unidad) == 0:
+        return None, None
+    
+    df_unidad = df_unidad.sort_values('Fecha', ascending=False)
+    ultimo = df_unidad.iloc[0]
+    
+    return ultimo['Kilometraje KM'], ultimo['Fecha']
+
+def calcular_km_promedio_diario_mejorado(df_hist, unidad, dias_max=90):
+    """Calcula KM promedio diario considerando solo los últimos N días"""
+    df_unidad = df_hist[df_hist['Nombre Unidad'] == unidad].copy()
+    
+    if len(df_unidad) < 2:
+        return 100
+    
+    # Ordenar por fecha descendente y tomar últimos registros
+    df_unidad = df_unidad.sort_values('Fecha', ascending=False)
+    
+    # Tomar solo los últimos N días de registros
+    fecha_reciente = df_unidad.iloc[0]['Fecha']
+    fecha_limite = fecha_reciente - timedelta(days=dias_max)
+    df_reciente = df_unidad[df_unidad['Fecha'] >= fecha_limite]
+    
+    if len(df_reciente) < 2:
+        # Si no hay suficientes datos recientes, usar todos
+        df_reciente = df_unidad
+    
+    # Agrupar por día (último registro del día)
+    df_reciente['Fecha_Dia'] = df_reciente['Fecha'].dt.date
+    df_por_dia = df_reciente.sort_values('Fecha', ascending=False)
+    df_por_dia = df_por_dia.drop_duplicates(subset=['Fecha_Dia'], keep='first')
+    df_por_dia = df_por_dia.sort_values('Fecha_Dia')
+    
+    if len(df_por_dia) < 2:
+        return 100
+    
+    # Calcular diferencias
+    total_km = 0
+    total_dias = 0
+    
+    for i in range(1, len(df_por_dia)):
+        fecha_actual = df_por_dia.iloc[i]['Fecha_Dia']
+        fecha_anterior = df_por_dia.iloc[i-1]['Fecha_Dia']
+        km_actual = df_por_dia.iloc[i]['Kilometraje KM']
+        km_anterior = df_por_dia.iloc[i-1]['Kilometraje KM']
+        
+        dias_dif = (fecha_actual - fecha_anterior).days
+        km_dif = km_actual - km_anterior
+        
+        if dias_dif > 0 and km_dif > 0:
+            total_km += km_dif
+            total_dias += dias_dif
+    
+    if total_dias > 0 and total_km > 0:
+        return total_km / total_dias
+    else:
+        return 100
+
+# ============================================
+# 3. FUNCIONES PARA CALENDARIO
 # ============================================
 
 def crear_vista_calendario(df_final, df_tipo_unidad=None):
@@ -58,7 +160,6 @@ def crear_vista_calendario(df_final, df_tipo_unidad=None):
             on='Unidad',
             how='left'
         )
-        # Rellenar valores vacíos
         df_con_fecha['Tipo Unidad'] = df_con_fecha['Tipo Unidad'].fillna('No especificado')
     
     return df_con_fecha
@@ -72,18 +173,15 @@ def crear_vista_por_mes(df_con_fecha, meses_a_mostrar=6):
     hoy = datetime.now()
     meses = []
     
-    # Generar próximos N meses
     for i in range(meses_a_mostrar):
         fecha = hoy + relativedelta(months=i)
         meses.append(fecha.strftime('%Y-%m'))
     
-    # Filtrar solo los próximos meses
     df_futuro = df_con_fecha[df_con_fecha['Mes_Año'].isin(meses)].copy()
     
     if len(df_futuro) == 0:
         return pd.DataFrame()
     
-    # Agrupar por mes
     vista_mes = df_futuro.groupby(['Año', 'Mes', 'Mes_Nombre', 'Mes_Año']).agg({
         'Unidad': 'count',
         'Alerta': lambda x: list(x),
@@ -91,8 +189,6 @@ def crear_vista_por_mes(df_con_fecha, meses_a_mostrar=6):
     }).reset_index()
     
     vista_mes = vista_mes.rename(columns={'Unidad': 'Cantidad_Unidades'})
-    
-    # Ordenar por fecha
     vista_mes = vista_mes.sort_values(['Año', 'Mes'])
     
     return vista_mes
@@ -107,7 +203,6 @@ def crear_vista_semanal(df_con_fecha, semanas_a_mostrar=8):
     semana_actual = hoy.isocalendar().week
     año_actual = hoy.year
     
-    # Filtrar próximas semanas
     df_futuro = df_con_fecha[
         (df_con_fecha['Año'] == año_actual) & 
         (df_con_fecha['Semana'] >= semana_actual)
@@ -116,11 +211,9 @@ def crear_vista_semanal(df_con_fecha, semanas_a_mostrar=8):
     if len(df_futuro) == 0:
         return pd.DataFrame()
     
-    # Limitar a N semanas
     semanas = sorted(df_futuro['Semana'].unique())[:semanas_a_mostrar]
     df_futuro = df_futuro[df_futuro['Semana'].isin(semanas)]
     
-    # Agrupar por semana
     vista_semana = df_futuro.groupby(['Año', 'Semana']).agg({
         'Unidad': 'count',
         'Alerta': lambda x: list(x),
@@ -129,15 +222,11 @@ def crear_vista_semanal(df_con_fecha, semanas_a_mostrar=8):
     
     vista_semana = vista_semana.rename(columns={'Unidad': 'Cantidad_Unidades'})
     
-    # Agregar rango de fechas de la semana
     def obtener_rango_semana(fila):
         year = fila['Año']
         week = fila['Semana']
-        
-        # Encontrar primer día de la semana (lunes)
         first_day = datetime.fromisocalendar(year, week, 1)
         last_day = first_day + timedelta(days=6)
-        
         return f"{first_day.strftime('%d/%m')} - {last_day.strftime('%d/%m')}"
     
     vista_semana['Rango_Semana'] = vista_semana.apply(obtener_rango_semana, axis=1)
@@ -146,50 +235,12 @@ def crear_vista_semanal(df_con_fecha, semanas_a_mostrar=8):
     return vista_semana
 
 # ============================================
-# 3. FUNCIÓN PRINCIPAL MODIFICADA
+# 4. FUNCIÓN PRINCIPAL MEJORADA
 # ============================================
 
-def calcular_km_promedio_diario_corregido(df_hist, unidad):
-    """Calcula KM promedio diario agrupando por día"""
-    df_unidad = df_hist[df_hist['Nombre Unidad'] == unidad].copy()
-    
-    if len(df_unidad) < 2:
-        return 100
-    
-    # Agrupar por día
-    df_unidad['Fecha_Dia'] = df_unidad['Fecha'].dt.date
-    df_por_dia = df_unidad.sort_values('Fecha', ascending=False)
-    df_por_dia = df_por_dia.drop_duplicates(subset=['Fecha_Dia'], keep='first')
-    df_por_dia = df_por_dia.sort_values('Fecha_Dia')
-    
-    if len(df_por_dia) < 2:
-        return 100
-    
-    # Calcular diferencias
-    total_km = 0
-    total_dias = 0
-    
-    for i in range(1, len(df_por_dia)):
-        fecha_actual = df_por_dia.iloc[i]['Fecha_Dia']
-        fecha_anterior = df_por_dia.iloc[i-1]['Fecha_Dia']
-        km_actual = df_por_dia.iloc[i]['Kilometraje KM']
-        km_anterior = df_por_dia.iloc[i-1]['Kilometraje KM']
-        
-        dias_dif = (fecha_actual - fecha_anterior).days
-        km_dif = km_actual - km_anterior
-        
-        if dias_dif > 0 and km_dif > 0:
-            total_km += km_dif
-            total_dias += dias_dif
-    
-    if total_dias > 0 and total_km > 0:
-        return total_km / total_dias
-    else:
-        return 100
-
 @st.cache_data(ttl=300)
-def cargar_y_calcular():
-    """Función principal modificada para incluir Tipo Unidad solo en calendario"""
+def cargar_y_calcular_mejorado():
+    """Función principal mejorada que considera múltiples mantenimientos"""
     
     try:
         # Cargar datos
@@ -219,195 +270,218 @@ def cargar_y_calcular():
                 'Nombre Unidad': 'Unidad',
                 'TIPO UNIDAD': 'Tipo Unidad'
             })
-            # Limpiar y rellenar valores
             df_tipo_unidad['Tipo Unidad'] = df_tipo_unidad['Tipo Unidad'].fillna('').astype(str).str.strip()
             df_tipo_unidad['Tipo Unidad'] = df_tipo_unidad['Tipo Unidad'].replace('', 'No especificado')
         else:
             df_tipo_unidad = pd.DataFrame(columns=['Unidad', 'Tipo Unidad'])
         
-        # Filtrar preventivos
-        if 'TIPO DE SERVICIO' in df_mto.columns:
-            mask = df_mto['TIPO DE SERVICIO'].str.contains('Preventivo', case=False, na=False)
-            df_mto_preventivo = df_mto[mask].copy()
-        else:
-            df_mto_preventivo = df_mto.copy()
+        # Obtener todas las unidades únicas
+        unidades = list(set(
+            list(df_mto['Nombre Unidad'].unique()) + 
+            list(df_hist['Nombre Unidad'].unique()) + 
+            list(df_cat['Nombre Unidad'].unique())
+        ))
+        unidades = [u for u in unidades if pd.notna(u) and str(u).strip() != '']
         
-        df_mto_preventivo = df_mto_preventivo.sort_values('FECHA', ascending=False)
-        df_ultimo_mto = df_mto_preventivo.groupby('Nombre Unidad').first().reset_index()
-        df_ultimo_mto = df_ultimo_mto.rename(columns={'Nombre Unidad': 'Nombre_Unidad'})
-        
-        # KM actual
-        df_hist_reciente = df_hist.sort_values('Fecha', ascending=False)
-        df_km_actual = df_hist_reciente.groupby('Nombre Unidad').first().reset_index()
-        df_km_actual = df_km_actual.rename(columns={
-            'Nombre Unidad': 'Nombre_Unidad',
-            'Kilometraje KM': 'KM_Actual',
-            'Fecha': 'Fecha_KM_Actual'
-        })
-        
-        # Combinar
-        df = pd.merge(
-            df_ultimo_mto[['Nombre_Unidad', 'FECHA', 'KILOMETRAJE']],
-            df_km_actual[['Nombre_Unidad', 'KM_Actual', 'Fecha_KM_Actual']],
-            on='Nombre_Unidad',
-            how='left'
-        )
-        
-        df = pd.merge(
-            df,
-            df_cat.rename(columns={'Nombre Unidad': 'Nombre_Unidad'})[['Nombre_Unidad', 'INTERVALO']],
-            on='Nombre_Unidad',
-            how='left'
-        )
-        
-        hoy = datetime.now()
-        
-        # Calcular KM promedio
-        unidades = df['Nombre_Unidad'].unique()
-        km_promedio_dict = {}
+        resultados = []
         
         for unidad in unidades:
-            promedio = calcular_km_promedio_diario_corregido(df_hist, unidad)
-            km_promedio_dict[unidad] = promedio
-        
-        df['KM_Promedio_Diario'] = df['Nombre_Unidad'].map(km_promedio_dict)
-        
-        # Cálculos básicos
-        df['Dias_Transcurridos'] = (hoy - df['FECHA']).dt.days
-        df['KM_Recorridos'] = df['KM_Actual'] - df['KILOMETRAJE']
-        df['KM_Esperado'] = df['KILOMETRAJE'] + df['INTERVALO']
-        
-        # % Avance
-        df['%_Avance'] = np.where(
-            df['INTERVALO'] > 0,
-            (df['KM_Recorridos'] / df['INTERVALO']) * 100,
-            0
-        )
-        
-        # Días Faltantes
-        def calcular_dias_faltantes_seguro(fila):
-            try:
-                km_rec = fila['KM_Recorridos']
-                intervalo = fila['INTERVALO']
-                prom_km_dia = fila['KM_Promedio_Diario']
+            # ============================================
+            # A. OBTENER ÚLTIMO MANTENIMIENTO PREVENTIVO
+            # ============================================
+            ultimo_preventivo = None
+            ultimo_km_preventivo = None
+            ultima_fecha_preventivo = None
+            
+            if 'TIPO DE SERVICIO' in df_mto.columns:
+                # Filtrar solo preventivos
+                mask = df_mto['TIPO DE SERVICIO'].str.contains('Preventivo', case=False, na=False)
+                df_preventivos = df_mto[mask].copy()
                 
-                if pd.isna(km_rec) or pd.isna(intervalo) or pd.isna(prom_km_dia):
-                    return np.nan
+                if not df_preventivos.empty:
+                    df_unidad_preventivo = df_preventivos[df_preventivos['Nombre Unidad'] == unidad]
+                    if not df_unidad_preventivo.empty:
+                        df_unidad_preventivo = df_unidad_preventivo.sort_values('FECHA', ascending=False)
+                        ultimo_preventivo = df_unidad_preventivo.iloc[0]
+                        ultimo_km_preventivo = ultimo_preventivo['KILOMETRAJE']
+                        ultima_fecha_preventivo = ultimo_preventivo['FECHA']
+            else:
+                # Si no hay columna de tipo, tomar el último mantenimiento en general
+                df_unidad_mto = df_mto[df_mto['Nombre Unidad'] == unidad]
+                if not df_unidad_mto.empty:
+                    df_unidad_mto = df_unidad_mto.sort_values('FECHA', ascending=False)
+                    ultimo_preventivo = df_unidad_mto.iloc[0]
+                    ultimo_km_preventivo = ultimo_preventivo['KILOMETRAJE']
+                    ultima_fecha_preventivo = ultimo_preventivo['FECHA']
+            
+            # ============================================
+            # B. OBTENER ÚLTIMO KILOMETRAJE (HISTÓRICO)
+            # ============================================
+            km_actual, fecha_km_actual = obtener_ultimo_kilometraje(df_hist, unidad)
+            
+            # ============================================
+            # C. OBTENER INTERVALO DEL CATÁLOGO
+            # ============================================
+            intervalo = None
+            if not df_cat.empty:
+                df_unidad_cat = df_cat[df_cat['Nombre Unidad'] == unidad]
+                if not df_unidad_cat.empty:
+                    intervalo = df_unidad_cat.iloc[0]['INTERVALO']
+            
+            # ============================================
+            # D. CÁLCULOS (solo si tenemos datos suficientes)
+            # ============================================
+            if (ultimo_km_preventivo is not None and 
+                pd.notna(ultimo_km_preventivo) and 
+                km_actual is not None and 
+                pd.notna(km_actual) and 
+                intervalo is not None and 
+                pd.notna(intervalo) and intervalo > 0):
                 
-                if prom_km_dia <= 0:
-                    return np.nan
+                hoy = datetime.now()
                 
-                km_faltantes = intervalo - km_rec
-                dias_faltantes = km_faltantes / prom_km_dia
+                # Calcular KM promedio diario
+                km_promedio_diario = calcular_km_promedio_diario_mejorado(df_hist, unidad)
                 
-                return round(dias_faltantes, 0)
-            except:
-                return np.nan
-        
-        df['Dias_Faltantes'] = df.apply(calcular_dias_faltantes_seguro, axis=1)
-        
-        # Fecha Estimada
-        def calcular_fecha_estimada_segura(fila):
-            try:
-                dias_faltantes = fila['Dias_Faltantes']
+                # Cálculos básicos
+                dias_transcurridos = (hoy - ultima_fecha_preventivo).days if ultima_fecha_preventivo else 0
+                km_recorridos = km_actual - ultimo_km_preventivo
+                km_esperado = ultimo_km_preventivo + intervalo
                 
-                if pd.isna(dias_faltantes):
-                    return None
-                
-                dias_faltantes = float(dias_faltantes)
-                if np.isnan(dias_faltantes) or np.isinf(dias_faltantes):
-                    return None
-                
-                return hoy + timedelta(days=int(dias_faltantes))
-            except:
-                return None
-        
-        df['Fecha_Estimada'] = df.apply(calcular_fecha_estimada_segura, axis=1)
-        
-        # Alertas
-        condiciones_alerta = [
-            df['%_Avance'] >= 100,
-            (df['%_Avance'] >= 80) & (df['%_Avance'] < 100),
-            df['%_Avance'] < 80
-        ]
-        
-        df['Alerta'] = np.select(
-            condiciones_alerta,
-            ['🔴 ATRASADO', '🟡 PROXIMO', '🟢 EN RANGO'],
-            default='🟢 EN RANGO'
-        )
-        
-        # Estado
-        def calcular_estado_seguro(fila):
-            try:
-                fecha_est = fila['Fecha_Estimada']
-                
-                if fecha_est is None or pd.isna(fecha_est):
-                    return ''
-                
-                if not isinstance(fecha_est, (datetime, pd.Timestamp)):
-                    return ''
-                
-                if fecha_est < hoy:
-                    return '❌ VENCIDO'
+                # % Avance
+                if intervalo > 0:
+                    porc_avance = (km_recorridos / intervalo) * 100
                 else:
-                    return '✅ A TIEMPO'
-            except:
-                return ''
-        
-        df['Estado'] = df.apply(calcular_estado_seguro, axis=1)
-        
-        # Formatear
-        df['KM_Promedio_Diario'] = df['KM_Promedio_Diario'].round(1)
-        df['%_Avance'] = df['%_Avance'].round(2)
-        df['Dias_Faltantes'] = pd.to_numeric(df['Dias_Faltantes'], errors='coerce').round(0)
-        
-        # DataFrame final (SIN TIPO UNIDAD en la tabla principal)
-        df_final = pd.DataFrame()
-        
-        df_final['Unidad'] = df['Nombre_Unidad']
-        df_final['KM Actual'] = df['KM_Actual'].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "")
-        df_final['Último Preventivo (km)'] = df['KILOMETRAJE'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
-        df_final['Fecha Último Preventivo'] = df['FECHA'].apply(
-            lambda x: x.strftime('%d/%m/%Y %H:%M') if pd.notna(x) else ""
-        )
-        df_final['Intervalo Preventivo'] = df['INTERVALO'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
-        df_final['KM Esperado Mantenimiento'] = df['KM_Esperado'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
-        df_final['KM Recorridos'] = df['KM_Recorridos'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
-        df_final['% Avance'] = df['%_Avance'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "0%")
-        df_final['Alerta'] = df['Alerta']
-        df_final['KM/Día Promedio'] = df['KM_Promedio_Diario'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
-        df_final['Días Faltantes'] = df['Dias_Faltantes'].apply(lambda x: f"{int(x)}" if pd.notna(x) else "")
-        
-        def formatear_fecha_segura(fecha):
-            if fecha is None or pd.isna(fecha):
-                return ""
-            try:
-                if isinstance(fecha, (datetime, pd.Timestamp)):
-                    return fecha.strftime('%d/%m/%Y %H:%M')
+                    porc_avance = 0
+                
+                # Días Faltantes
+                if km_promedio_diario > 0:
+                    dias_faltantes = (intervalo - km_recorridos) / km_promedio_diario
+                    dias_faltantes = max(0, dias_faltantes)
                 else:
-                    return str(fecha)
-            except:
-                return ""
+                    dias_faltantes = np.nan
+                
+                # Fecha Estimada
+                fecha_estimada = None
+                if pd.notna(dias_faltantes) and not np.isinf(dias_faltantes):
+                    try:
+                        fecha_estimada = hoy + timedelta(days=int(dias_faltantes))
+                    except:
+                        fecha_estimada = None
+                
+                # Alertas
+                if porc_avance >= 100:
+                    alerta = '🔴 ATRASADO'
+                elif porc_avance >= 80:
+                    alerta = '🟡 PROXIMO'
+                else:
+                    alerta = '🟢 EN RANGO'
+                
+                # Estado
+                if fecha_estimada and fecha_estimada < hoy:
+                    estado = '❌ VENCIDO'
+                else:
+                    estado = '✅ A TIEMPO'
+                
+                # Agregar a resultados
+                resultados.append({
+                    'Unidad': unidad,
+                    'KM_Actual': km_actual,
+                    'Ultimo_Preventivo_KM': ultimo_km_preventivo,
+                    'Fecha_Ultimo_Preventivo': ultima_fecha_preventivo,
+                    'Intervalo': intervalo,
+                    'KM_Esperado': km_esperado,
+                    'KM_Recorridos': km_recorridos,
+                    'Porc_Avance': porc_avance,
+                    'Alerta': alerta,
+                    'KM_Promedio_Diario': km_promedio_diario,
+                    'Dias_Faltantes': dias_faltantes,
+                    'Fecha_Estimada': fecha_estimada,
+                    'Estado': estado,
+                    'Fecha_KM_Actual': fecha_km_actual
+                })
         
-        df_final['Fecha Estimada Mantenimiento'] = df['Fecha_Estimada'].apply(formatear_fecha_segura)
-        df_final['Estado'] = df['Estado']
-        
-        # Ordenar
-        orden_alerta = {'🔴 ATRASADO': 0, '🟡 PROXIMO': 1, '🟢 EN RANGO': 2}
-        df_final['Orden'] = df_final['Alerta'].map(orden_alerta)
-        df_final['Dias_Faltantes_Num'] = pd.to_numeric(df_final['Días Faltantes'], errors='coerce')
-        df_final = df_final.sort_values(['Orden', 'Dias_Faltantes_Num'])
-        df_final = df_final.drop(columns=['Orden', 'Dias_Faltantes_Num'])
-        
-        return df_final, df, df_tipo_unidad
-        
+        # Convertir a DataFrame
+        if resultados:
+            df_resultados = pd.DataFrame(resultados)
+            
+            # Formatear para presentación
+            df_final = pd.DataFrame()
+            df_final['Unidad'] = df_resultados['Unidad']
+            df_final['KM Actual'] = df_resultados['KM_Actual'].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "")
+            df_final['Fecha Último Kilometraje'] = df_resultados['Fecha_KM_Actual'].apply(
+                lambda x: x.strftime('%d/%m/%Y %H:%M') if pd.notna(x) else ""
+            )
+            df_final['Último Preventivo (km)'] = df_resultados['Ultimo_Preventivo_KM'].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else ""
+            )
+            df_final['Fecha Último Preventivo'] = df_resultados['Fecha_Ultimo_Preventivo'].apply(
+                lambda x: x.strftime('%d/%m/%Y %H:%M') if pd.notna(x) else ""
+            )
+            df_final['Intervalo Preventivo'] = df_resultados['Intervalo'].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else ""
+            )
+            df_final['KM Esperado Mantenimiento'] = df_resultados['KM_Esperado'].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else ""
+            )
+            df_final['KM Recorridos'] = df_resultados['KM_Recorridos'].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else ""
+            )
+            df_final['% Avance'] = df_resultados['Porc_Avance'].apply(
+                lambda x: f"{x:.2f}%" if pd.notna(x) else "0%"
+            )
+            df_final['Alerta'] = df_resultados['Alerta']
+            df_final['KM/Día Promedio'] = df_resultados['KM_Promedio_Diario'].apply(
+                lambda x: f"{x:.1f}" if pd.notna(x) else ""
+            )
+            df_final['Días Faltantes'] = df_resultados['Dias_Faltantes'].apply(
+                lambda x: f"{int(x)}" if pd.notna(x) and not np.isnan(x) else ""
+            )
+            
+            def formatear_fecha_segura(fecha):
+                if fecha is None or pd.isna(fecha):
+                    return ""
+                try:
+                    if isinstance(fecha, (datetime, pd.Timestamp)):
+                        return fecha.strftime('%d/%m/%Y %H:%M')
+                    else:
+                        return str(fecha)
+                except:
+                    return ""
+            
+            df_final['Fecha Estimada Mantenimiento'] = df_resultados['Fecha_Estimada'].apply(formatear_fecha_segura)
+            df_final['Estado'] = df_resultados['Estado']
+            
+            # Ordenar por alerta y días faltantes
+            orden_alerta = {'🔴 ATRASADO': 0, '🟡 PROXIMO': 1, '🟢 EN RANGO': 2}
+            df_final['Orden'] = df_final['Alerta'].map(orden_alerta)
+            
+            # Convertir Días Faltantes a numérico para ordenar
+            def convertir_dias_faltantes(valor):
+                try:
+                    return float(str(valor).replace(',', ''))
+                except:
+                    return np.nan
+            
+            df_final['Dias_Faltantes_Num'] = df_final['Días Faltantes'].apply(convertir_dias_faltantes)
+            df_final = df_final.sort_values(['Orden', 'Dias_Faltantes_Num'])
+            df_final = df_final.drop(columns=['Orden', 'Dias_Faltantes_Num'])
+            
+            # DataFrame completo para cálculos internos
+            df_completo = df_resultados.copy()
+            
+            return df_final, df_completo, df_tipo_unidad
+        else:
+            return pd.DataFrame(), pd.DataFrame(), df_tipo_unidad
+            
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"❌ Error en cálculo mejorado: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # ============================================
-# 4. INTERFAZ PRINCIPAL CON PESTAÑAS
+# 5. INTERFAZ PRINCIPAL CON MEJORAS
 # ============================================
 
 st.set_page_config(
@@ -418,29 +492,36 @@ st.set_page_config(
 
 st_autorefresh(interval=15 * 60 * 1000, key="datarefresh")
 
-# Título principal
-st.title("🚗 DASHBOARD DE MANTENIMIENTOS ")
-st.markdown(f"Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+st.title("🚗 DASHBOARD DE MANTENIMIENTOS")
+st.markdown(f"**Actualizado:** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
-# Cargar datos
-with st.spinner("🔄 Cargando datos..."):
-    df_final, df_completo, df_tipo_unidad = cargar_y_calcular()
+# Cargar datos mejorados
+with st.spinner("🔄 Cargando datos mejorados..."):
+    df_final, df_completo, df_tipo_unidad = cargar_y_calcular_mejorado()
 
 if df_final.empty:
     st.error("⚠️ No se pudieron cargar los datos.")
 else:
-    # ============================================
-    # 5. CREAR VISTAS DE CALENDARIO CON TIPO UNIDAD
-    # ============================================
-    
+    # Crear vistas de calendario
     df_calendario = crear_vista_calendario(df_final, df_tipo_unidad)
     df_por_mes = crear_vista_por_mes(df_calendario, meses_a_mostrar=6)
     df_por_semana = crear_vista_semanal(df_calendario, semanas_a_mostrar=8)
     
-    # ============================================
-    # 6. PESTAÑAS PRINCIPALES
-    # ============================================
+    # Resumen general
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Unidades", len(df_final))
+    with col2:
+        atrasados = len(df_final[df_final['Alerta'] == '🔴 ATRASADO'])
+        st.metric("Atrasados", atrasados, delta=f"-{atrasados}" if atrasados > 0 else "0")
+    with col3:
+        proximos = len(df_final[df_final['Alerta'] == '🟡 PROXIMO'])
+        st.metric("Próximos", proximos)
+    with col4:
+        en_rango = len(df_final[df_final['Alerta'] == '🟢 EN RANGO'])
+        st.metric("En Rango", en_rango)
     
+    # Pestañas principales
     tab1, tab2, tab3, tab4 = st.tabs([
         "📋 Tabla Principal", 
         "📅 Vista por Mes", 
@@ -449,12 +530,10 @@ else:
     ])
     
     with tab1:
-        # TABLA PRINCIPAL (SIN TIPO UNIDAD)
         st.subheader("📋 TABLA PRINCIPAL DE MANTENIMIENTOS")
         
         # Filtros
         st.sidebar.header("🔍 FILTROS - TABLA PRINCIPAL")
-        
         alertas = sorted(df_final['Alerta'].unique())
         estados = sorted([e for e in df_final['Estado'].unique() if e != ''])
         unidades = sorted(df_final['Unidad'].unique())
@@ -472,13 +551,13 @@ else:
         
         st.sidebar.metric("Unidades filtradas", len(df_filtrado))
         
-        # Mostrar tabla (SIN TIPO UNIDAD)
+        # Mostrar tabla
         columnas_mostrar = [
-            'Unidad', 'KM Actual', 'Último Preventivo (km)', 
-            'Fecha Último Preventivo', 'Intervalo Preventivo',
-            'KM Esperado Mantenimiento', 'KM Recorridos', '% Avance',
-            'Alerta', 'KM/Día Promedio', 'Días Faltantes', 
-            'Fecha Estimada Mantenimiento', 'Estado'
+            'Unidad', 'KM Actual', 'Fecha Último Kilometraje',
+            'Último Preventivo (km)', 'Fecha Último Preventivo', 
+            'Intervalo Preventivo', 'KM Esperado Mantenimiento', 
+            'KM Recorridos', '% Avance', 'Alerta', 'KM/Día Promedio', 
+            'Días Faltantes', 'Fecha Estimada Mantenimiento', 'Estado'
         ]
         
         st.dataframe(
@@ -754,14 +833,13 @@ else:
         else:
             st.info("No hay datos de calendario disponibles")
 
-
 # ============================================
-# 8. PIE DE PÁGINA
+# 6. PIE DE PÁGINA
 # ============================================
 
 st.markdown("---")
 st.caption(f"""
-🚗 **Dashboard de Mantenimientos** | 
+🚗 **Dashboard de Mantenimientos ** | 
 {len(df_final) if not df_final.empty else 0} unidades monitoreadas | 
 {len(df_calendario) if not df_calendario.empty else 0} con fecha estimada | 
 Última actualización: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
